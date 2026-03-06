@@ -18,6 +18,44 @@ def get_target_date():
             pass
     return datetime.now().strftime("%Y-%m-%d")
 
+def decode_project_path(encoded):
+    """Decode Claude project dir name back to real filesystem path.
+
+    Claude encodes: F--aiProject-monado-main
+    '--' = drive separator (F:/)
+    '-' = could be '/' or literal '-' in folder names.
+    Try all 2^(n-1) combinations and return the one that exists.
+    """
+    if "--" not in encoded:
+        return None
+    parts = encoded.split("--", 1)
+    drive = parts[0].upper() + ":/"
+    rest = parts[1]
+
+    if not rest:
+        return drive.rstrip("/")
+
+    segments = rest.split("-")
+    n = len(segments)
+
+    # Each bit in mask decides: 0='/' separator, 1='-' join
+    # We have n-1 separators between n segments
+    for mask in range(1 << (n - 1)):
+        path_parts = [segments[0]]
+        for i in range(1, n):
+            if mask & (1 << (i - 1)):
+                # Join with '-'
+                path_parts[-1] = path_parts[-1] + "-" + segments[i]
+            else:
+                # New path segment
+                path_parts.append(segments[i])
+        candidate = os.path.join(drive, *path_parts)
+        if os.path.isdir(candidate):
+            return candidate
+
+    return None
+
+
 def collect_git_commits(target_date):
     """Scan all known project dirs for git commits on target date."""
     projects_dir = os.path.expanduser("~/.claude/projects")
@@ -26,10 +64,10 @@ def collect_git_commits(target_date):
         return results
 
     for proj in os.listdir(projects_dir):
-        path = proj.replace("--", ":/", 1).replace("-", "/")
-        if len(path) > 2 and path[1] == ':':
-            path = path[0].upper() + path[1:]
-        if not os.path.isdir(path) or not os.path.isdir(os.path.join(path, ".git")):
+        path = decode_project_path(proj)
+        if not path or not os.path.isdir(path):
+            continue
+        if not os.path.isdir(os.path.join(path, ".git")):
             continue
         try:
             r = subprocess.run(
@@ -134,7 +172,7 @@ def main():
     sessions = collect_session_messages(target_date)
     if sessions:
         for proj, msgs in sorted(sessions.items()):
-            readable = proj.replace("--", ":/", 1).replace("-", "/")
+            readable = decode_project_path(proj) or proj.replace("--", ":/", 1).replace("-", "/")
             print(f"\n### {readable}")
             seen = set()
             count = 0
