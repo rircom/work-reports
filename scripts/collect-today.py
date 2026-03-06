@@ -101,23 +101,34 @@ def collect_git_commits(target_date):
     return results
 
 def collect_session_messages(target_date):
-    """Extract user messages from Claude session logs for target date."""
+    """Extract user messages from Claude session logs for target date.
+
+    Returns dict: { "project/session_id": [messages] }
+    Each session is a separate entry so no conversations get lost.
+    Also searches subdirectories (e.g. subagents/).
+    """
     projects_dir = os.path.expanduser("~/.claude/projects")
     results = {}
     if not os.path.isdir(projects_dir):
         return results
 
-    skip_prefixes = ("<", "Base directory", "This session is being", "{", "[")
+    skip_prefixes = ("<", "Base directory", "This session is being", "{", "[",
+                     "Tool loaded", "Continue from where")
 
     for proj in os.listdir(projects_dir):
         proj_path = os.path.join(projects_dir, proj)
         if not os.path.isdir(proj_path):
             continue
 
-        for f in glob.glob(os.path.join(proj_path, "*.jsonl")):
+        # Search JSONL files in project dir AND subdirectories
+        for f in glob.glob(os.path.join(proj_path, "**", "*.jsonl"), recursive=True):
             mtime = os.path.getmtime(f)
             if datetime.fromtimestamp(mtime).strftime("%Y-%m-%d") != target_date:
                 continue
+
+            # Use session ID (filename without extension) as key
+            session_id = os.path.splitext(os.path.basename(f))[0][:8]
+            session_key = f"{proj}#{session_id}"
 
             user_msgs = []
             try:
@@ -137,7 +148,7 @@ def collect_session_messages(target_date):
                                 texts = [content]
 
                             for txt in texts:
-                                txt = txt.strip().replace("\xa0", " ")[:200]
+                                txt = txt.strip().replace("\xa0", " ")[:300]
                                 if txt and not any(txt.startswith(p) for p in skip_prefixes):
                                     user_msgs.append(txt)
                         except (json.JSONDecodeError, KeyError, TypeError):
@@ -146,9 +157,7 @@ def collect_session_messages(target_date):
                 pass
 
             if user_msgs:
-                if proj not in results:
-                    results[proj] = []
-                results[proj].extend(user_msgs)
+                results[session_key] = user_msgs
 
     return results
 
@@ -171,16 +180,19 @@ def main():
     print("\n## Claude 세션 대화")
     sessions = collect_session_messages(target_date)
     if sessions:
-        for proj, msgs in sorted(sessions.items()):
+        for session_key, msgs in sorted(sessions.items()):
+            proj, session_id = session_key.rsplit("#", 1)
             readable = decode_project_path(proj) or proj.replace("--", ":/", 1).replace("-", "/")
-            print(f"\n### {readable}")
+            print(f"\n### {readable} (session {session_id})")
             seen = set()
             count = 0
             for m in msgs:
-                if m not in seen and count < 20:
+                if m not in seen and count < 30:
                     seen.add(m)
                     print(f"  - {m}")
                     count += 1
+            if len(msgs) > count:
+                print(f"  ... ({len(msgs) - count}개 메시지 생략)")
     else:
         print("  (세션 없음)")
 
